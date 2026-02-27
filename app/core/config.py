@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     MOCK_USER_EMAIL: str = "demo@devlogs.com"
     
     # CORS
-    ALLOWED_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:3001"]
+    ALLOWED_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:3001", "https://developer-logs.vercel.app/"]
     
     class Config:
         env_file = ".env"
