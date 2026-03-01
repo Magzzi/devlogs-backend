@@ -32,12 +32,13 @@ async def get_current_user(
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        # PyJWT uses JWT_SECRET as a raw UTF-8 string for HS256,
-        # which matches how Supabase signs its tokens.
+        # Accept all HMAC algorithm variants — Supabase GoTrue may use
+        # HS256, HS384, or HS512 depending on the project configuration.
+        # Self-issued fallback tokens use HS256.
         payload = pyjwt.decode(
             credentials.credentials,
             settings.JWT_SECRET,
-            algorithms=["HS256"],
+            algorithms=["HS256", "HS384", "HS512"],
             options={"verify_aud": False},
         )
         user_id: str = payload.get("sub")
