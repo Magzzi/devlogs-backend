@@ -1,6 +1,7 @@
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from jose import jwt, JWTError
+import jwt as pyjwt
+from jwt.exceptions import PyJWTError
 from typing import Optional
 from uuid import UUID
 
@@ -25,13 +26,12 @@ async def get_current_user(
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        payload = jwt.decode(
+        # PyJWT uses JWT_SECRET as a raw UTF-8 string for HS256,
+        # which matches how Supabase signs its tokens.
+        payload = pyjwt.decode(
             credentials.credentials,
             settings.JWT_SECRET,
             algorithms=["HS256"],
-            # Supabase sets aud="authenticated"; skip audience check so the
-            # same secret works whether the token was issued by the anon or
-            # service-role key.
             options={"verify_aud": False},
         )
         user_id: str = payload.get("sub")
@@ -39,5 +39,5 @@ async def get_current_user(
         if not user_id:
             raise exc
         return TokenData(user_id=UUID(user_id), email=email)
-    except JWTError:
+    except PyJWTError:
         raise exc
