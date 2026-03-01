@@ -43,7 +43,27 @@ async def get_current_user(
         user_id: str = payload.get("sub")
         email: str = payload.get("email")
         if not user_id:
-            raise exc
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token missing 'sub' claim",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
         return TokenData(user_id=UUID(user_id), email=email)
-    except PyJWTError:
-        raise exc
+    except pyjwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has expired",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except pyjwt.InvalidSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token signature — token may have been signed with a different key",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except PyJWTError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"JWT validation failed: {type(e).__name__}: {e}",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
