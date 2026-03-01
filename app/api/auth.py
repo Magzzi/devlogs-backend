@@ -1,8 +1,8 @@
-import asyncio
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
-from app.core.database import get_supabase
+from app.core.config import settings
 from app.core.security import get_current_user, TokenData
 
 router = APIRouter()
@@ -21,36 +21,37 @@ class LoginResponse(BaseModel):
 
 @router.post("/login", response_model=LoginResponse)
 async def login(body: LoginRequest):
-    """Authenticate via Supabase Auth and return the session token."""
-    supabase = get_supabase()
-    try:
-        response = await asyncio.to_thread(
-            lambda: supabase.auth.sign_in_with_password(
-                {"email": body.email, "password": body.password}
-            )
+    """Authenticate via Supabase Auth REST API using the anon key."""
+    url = f"{settings.SUPABASE_URL}/auth/v1/token?grant_type=password"
+    headers = {
+        "apikey": settings.SUPABASE_ANON_KEY,
+        "Content-Type": "application/json",
+    }
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            url,
+            headers=headers,
+            json={"email": body.email, "password": body.password},
+            timeout=10,
         )
-    except Exception as exc:
+
+    if response.status_code != 200:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
-        ) from exc
-
-    if not response.session:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password",
         )
 
-    user = response.user
-    session = response.session
-    name = (user.user_metadata or {}).get("name") or (user.user_metadata or {}).get("full_name") or user.email
+    data = response.json()
+    user_meta = data.get("user", {}).get("user_metadata") or {}
+    name = user_meta.get("name") or user_meta.get("full_name") or data["user"]["email"]
 
     return LoginResponse(
-        access_token=session.access_token,
+        access_token=data["access_token"],
         token_type="bearer",
         user={
-            "id": str(user.id),
-            "email": user.email,
+            "id": data["user"]["id"],
+            "email": data["user"]["email"],
             "name": name,
         },
     )
@@ -69,3 +70,4 @@ async def me(current_user: TokenData = Depends(get_current_user)):
         "id": str(current_user.user_id),
         "email": current_user.email,
     }
+
