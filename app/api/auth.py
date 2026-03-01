@@ -82,11 +82,20 @@ async def login(body: LoginRequest):
     # ── Attempt 2: Direct DB password check (fallback) ──────────────────
     sb = get_supabase()
 
-    # Verify email + password via pgcrypto crypt()
-    result = sb.rpc(
-        "verify_user_password",
-        {"p_email": body.email, "p_password": body.password},
-    ).execute()
+    try:
+        # Verify email + password via pgcrypto crypt()
+        result = sb.rpc(
+            "verify_user_password",
+            {"p_email": body.email, "p_password": body.password},
+        ).execute()
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Auth service is unavailable and the fallback verify_user_password "
+                f"RPC function may not exist. Error: {e}"
+            ),
+        )
 
     if not result.data or not result.data[0].get("is_valid"):
         raise HTTPException(
