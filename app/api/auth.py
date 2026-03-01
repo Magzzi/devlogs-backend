@@ -27,6 +27,10 @@ class VerifyEmailRequest(BaseModel):
     type: str = "signup"  # or "recovery", "magiclink"
 
 
+class SetPasswordRequest(BaseModel):
+    password: str
+
+
 class LoginResponse(BaseModel):
     access_token: str
     token_type: str
@@ -344,6 +348,58 @@ async def resend_verification(body: LoginRequest):
         )
 
 
+@router.post("/set-password")
+async def set_password(
+    body: SetPasswordRequest,
+    current_user: TokenData = Depends(get_current_user)
+):
+    """
+    Set password for OAuth users who don't have one.
+    This allows OAuth users to also login with email/password.
+    """
+    try:
+        # Use Supabase admin API to update user password
+        url = f"{settings.SUPABASE_URL}/auth/v1/admin/users/{current_user.user_id}"
+        headers = {
+            "apikey": settings.SUPABASE_SERVICE_KEY,
+            "Authorization": f"Bearer {settings.SUPABASE_SERVICE_KEY}",
+            "Content-Type": "application/json",
+        }
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.put(
+                url,
+                headers=headers,
+                json={
+                    "password": body.password,
+                },
+                timeout=10,
+            )
+        
+        if response.status_code == 200:
+            return {"message": "Password set successfully"}
+        
+        # Handle errors
+        try:
+            error_data = response.json()
+            detail = error_data.get("error_description") or error_data.get("message") or "Failed to set password"
+        except Exception:
+            detail = "Failed to set password"
+        
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=detail
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Service unavailable: {str(e)}"
+        )
+
+
 @router.post("/logout")
 async def logout():
     """Client should discard the stored token on logout."""
@@ -358,6 +414,8 @@ async def me(current_user: TokenData = Depends(get_current_user)):
     name = None
     display_name = None
     email_confirmed = False
+    has_password = False  # Default to False for OAuth users
+    
     try:
         result = (
             sb.table("users")
@@ -372,12 +430,33 @@ async def me(current_user: TokenData = Depends(get_current_user)):
             email_confirmed = result.data.get("email_confirmed_at") is not None
     except Exception:
         pass
+    
+    # Check if user has email/password provider in identities
+    try:
+        identities = (
+            sb.from_("auth.identities")
+            .select("provider")
+            .eq("user_id", str(current_user.user_id))
+            .execute()
+        )
+        
+        if identities.data:
+            # User has password if 'email' provider exists
+            has_password = any(
+                identity.get("provider") == "email" 
+                for identity in identities.data
+            )
+    except Exception:
+        # Default to True to avoid blocking users if check fails
+        has_password = True
+    
     return {
         "id": str(current_user.user_id),
         "email": current_user.email,
         "name": name or "",
         "display_name": display_name or name or "",
         "email_confirmed": email_confirmed,
+        "has_password": has_password,
     }
 
 
