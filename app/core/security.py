@@ -7,7 +7,7 @@ from uuid import UUID
 
 from app.core.config import settings
 
-_bearer = HTTPBearer()
+_bearer = HTTPBearer(auto_error=False)
 
 
 class TokenData:
@@ -20,6 +20,12 @@ async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(_bearer),
 ) -> TokenData:
     """Verify the Supabase JWT and return the authenticated user."""
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     exc = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
