@@ -135,9 +135,60 @@ async def logout():
 
 @router.get("/me")
 async def me(current_user: TokenData = Depends(get_current_user)):
-    """Return the currently authenticated user from their JWT."""
+    """Return the currently authenticated user from their JWT + public profile."""
+    sb = get_supabase()
+    # Fetch display name from public.users
+    name = None
+    try:
+        result = (
+            sb.table("users")
+            .select("name")
+            .eq("id", str(current_user.user_id))
+            .maybe_single()
+            .execute()
+        )
+        if result.data:
+            name = result.data.get("name")
+    except Exception:
+        pass
     return {
         "id": str(current_user.user_id),
         "email": current_user.email,
+        "name": name or "",
     }
+
+
+class UpdateProfileRequest(BaseModel):
+    name: str
+
+
+@router.patch("/profile")
+async def update_profile(
+    body: UpdateProfileRequest,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Update the current user's display name in public.users."""
+    sb = get_supabase()
+    try:
+        result = (
+            sb.table("users")
+            .update({"name": body.name.strip()})
+            .eq("id", str(current_user.user_id))
+            .execute()
+        )
+        if not result.data:
+            # Row might not exist yet — upsert it
+            sb.table("users").upsert(
+                {
+                    "id": str(current_user.user_id),
+                    "email": current_user.email or "",
+                    "name": body.name.strip(),
+                }
+            ).execute()
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update profile: {e}",
+        )
+    return {"message": "Profile updated", "name": body.name.strip()}
 
