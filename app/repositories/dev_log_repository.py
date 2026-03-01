@@ -1,14 +1,18 @@
-from typing import List, Optional, Dict, Any
-from uuid import UUID, uuid4
+import asyncio
+from typing import List, Optional, Dict, Any, Tuple
+from uuid import UUID
 from datetime import date, datetime
 
-from app.core.database import logs_db, projects_db
+from app.core.database import get_supabase
 
 
 class DevLogRepository:
     def __init__(self):
-        pass
-    
+        self._sb = get_supabase()
+
+    def _run(self, fn):
+        return asyncio.to_thread(fn)
+
     async def create(
         self,
         user_id: UUID,
@@ -17,10 +21,9 @@ class DevLogRepository:
         content_json: Dict[str, Any],
         log_date: date = None,
         tags: List[str] = None,
-        visibility: str = "private"
+        visibility: str = "private",
     ) -> Dict[str, Any]:
-        log = {
-            "id": str(uuid4()),
+        data = {
             "user_id": str(user_id),
             "project_id": str(project_id),
             "title": title,
@@ -28,23 +31,28 @@ class DevLogRepository:
             "log_date": (log_date or date.today()).isoformat(),
             "tags": tags or [],
             "visibility": visibility,
-            "ai_summary": None,
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat(),
         }
-        logs_db[log["id"]] = log
-        return log
-    
+        result = await self._run(
+            lambda: self._sb.table("dev_logs").insert(data).execute()
+        )
+        return result.data[0]
+
     async def get_by_id(self, log_id: UUID, user_id: UUID) -> Optional[Dict[str, Any]]:
-        log = logs_db.get(str(log_id))
-        if log and log["user_id"] == str(user_id):
-            # Attach project info
-            project = projects_db.get(log["project_id"])
-            if project:
-                log["project"] = project
-            return log
-        return None
-    
+        result = await self._run(
+            lambda: self._sb.table("dev_logs")
+            .select("*, projects(*)")
+            .eq("id", str(log_id))
+            .eq("user_id", str(user_id))
+            .maybe_single()
+            .execute()
+        )
+        if not result.data:
+            return None
+        log = result.data
+        if "projects" in log:
+            log["project"] = log.pop("projects")
+        return log
+
     async def get_logs(
         self,
         user_id: UUID,
@@ -54,124 +62,110 @@ class DevLogRepository:
         tags: Optional[List[str]] = None,
         search: Optional[str] = None,
         page: int = 1,
-        page_size: int = 20
-    ) -> tuple[List[Dict[str, Any]], int]:
-        """Get filtered and paginated logs."""
-        # Filter by user
-        user_logs = [
-            log for log in logs_db.values()
-            if log["user_id"] == str(user_id)
-        ]
-        
-        # Apply filters
-        if project_id:
-            user_logs = [log for log in user_logs if log["project_id"] == str(project_id)]
-        
-        if from_date:
-            user_logs = [log for log in user_logs if log["log_date"] >= from_date.isoformat()]
-        
-        if to_date:
-            user_logs = [log for log in user_logs if log["log_date"] <= to_date.isoformat()]
-        
+        page_size: int = 20,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        def _query():
+            q = (
+                self._sb.table("dev_logs")
+                .select("*, projects(*)", count="exact")
+                .eq("user_id", str(user_id))
+            )
+            if project_id:
+                q = q.eq("project_id", str(project_id))
+            if from_date:
+                q = q.gte("log_date", from_date.isoformat())
+            if to_date:
+                q = q.lte("log_date", to_date.isoformat())
+            q = q.order("log_date", desc=True).order("created_at", desc=True)
+            return q.execute()
+
+        result = await self._run(_query)
+        logs = result.data
+
+        # Rename nested project key
+        for log in logs:
+            if "projects" in log:
+                log["project"] = log.pop("projects")
+
+        # Python-side filters (tags / full-text search)
         if tags:
-            user_logs = [
-                log for log in user_logs
-                if any(tag in log.get("tags", []) for tag in tags)
-            ]
-        
+            logs = [lg for lg in logs if any(t in lg.get("tags", []) for t in tags)]
         if search:
-            search_lower = search.lower()
-            user_logs = [
-                log for log in user_logs
-                if search_lower in log["title"].lower() or
-                   search_lower in log["content_json"].get("summary", "").lower()
+            s = search.lower()
+            logs = [
+                lg for lg in logs
+                if s in lg["title"].lower()
+                or s in (lg.get("content_json") or {}).get("summary", "").lower()
             ]
-        
-        total = len(user_logs)
-        
-        # Sort by log_date desc, then created_at desc
-        user_logs.sort(key=lambda x: (x["log_date"], x["created_at"]), reverse=True)
-        
-        # Apply pagination
-        start_idx = (page - 1) * page_size
-        end_idx = start_idx + page_size
-        paginated_logs = user_logs[start_idx:end_idx]
-        
-        # Attach project info
-        for log in paginated_logs:
-            project = projects_db.get(log["project_id"])
-            if project:
-                log["project"] = project
-        
-        return paginated_logs, total
-    
+
+        total = len(logs)
+        start = (page - 1) * page_size
+        return logs[start : start + page_size], total
+
     async def get_logs_grouped_by_date(
         self,
         user_id: UUID,
         from_date: Optional[date] = None,
-        to_date: Optional[date] = None
+        to_date: Optional[date] = None,
     ) -> Dict[str, List[Dict[str, Any]]]:
-        """Get logs grouped by date for timeline view."""
         logs, _ = await self.get_logs(
             user_id=user_id,
             from_date=from_date,
             to_date=to_date,
-            page_size=100
+            page_size=100,
         )
-        
-        grouped = {}
+        grouped: Dict[str, List] = {}
         for log in logs:
-            log_date = log["log_date"]
-            if log_date not in grouped:
-                grouped[log_date] = []
-            grouped[log_date].append(log)
-        
+            key = log["log_date"]
+            grouped.setdefault(key, []).append(log)
         return grouped
-    
+
     async def update(self, log_id: UUID, user_id: UUID, **kwargs) -> Optional[Dict[str, Any]]:
-        log = await self.get_by_id(log_id, user_id)
-        if not log:
-            return None
-        
+        updatable = ("title", "content_json", "log_date", "tags", "visibility", "project_id")
+        updates = {}
         for key, value in kwargs.items():
-            if value is not None and key in ["title", "content_json", "log_date", "tags", "visibility", "project_id"]:
-                if key == "log_date" and isinstance(value, date):
-                    log[key] = value.isoformat()
-                else:
-                    log[key] = value
-        
-        log["updated_at"] = datetime.utcnow().isoformat()
-        return log
-    
-    async def delete(self, log_id: UUID, user_id: UUID) -> bool:
-        log = logs_db.get(str(log_id))
-        if log and log["user_id"] == str(user_id):
-            del logs_db[str(log_id)]
-            return True
-        return False
-    
-    async def get_stats(self, user_id: UUID, from_date: date, to_date: date) -> Dict[str, Any]:
-        """Get statistics for dashboard."""
-        user_logs = [
-            log for log in logs_db.values()
-            if log["user_id"] == str(user_id) and
-               from_date.isoformat() <= log["log_date"] <= to_date.isoformat()
-        ]
-        
-        log_count = len(user_logs)
-        
-        # Count active projects
-        active_project_ids = set(log["project_id"] for log in user_logs)
-        active_projects = len(active_project_ids)
-        
-        # Sum hours logged
-        total_hours = sum(
-            log["content_json"].get("time_spent_hours", 0)
-            for log in user_logs
+            if value is not None and key in updatable:
+                updates[key] = value.isoformat() if key == "log_date" and isinstance(value, date) else value
+        if not updates:
+            return await self.get_by_id(log_id, user_id)
+        updates["updated_at"] = datetime.utcnow().isoformat()
+        result = await self._run(
+            lambda: self._sb.table("dev_logs")
+            .update(updates)
+            .eq("id", str(log_id))
+            .eq("user_id", str(user_id))
+            .execute()
         )
-        
+        return result.data[0] if result.data else None
+
+    async def delete(self, log_id: UUID, user_id: UUID) -> bool:
+        result = await self._run(
+            lambda: self._sb.table("dev_logs")
+            .delete()
+            .eq("id", str(log_id))
+            .eq("user_id", str(user_id))
+            .execute()
+        )
+        return len(result.data) > 0
+
+    async def get_stats(
+        self, user_id: UUID, from_date: date, to_date: date
+    ) -> Dict[str, Any]:
+        result = await self._run(
+            lambda: self._sb.table("dev_logs")
+            .select("project_id, content_json")
+            .eq("user_id", str(user_id))
+            .gte("log_date", from_date.isoformat())
+            .lte("log_date", to_date.isoformat())
+            .execute()
+        )
+        logs = result.data
+        active_projects = len({lg["project_id"] for lg in logs})
+        total_hours = sum(
+            (lg.get("content_json") or {}).get("time_spent_hours", 0) for lg in logs
+        )
         return {
-            "logs_count": log_count,
+            "logs_count": len(logs),
             "active_projects": active_projects,
-            "hours_logged": round(total_hours, 1)
+            "hours_logged": round(total_hours, 1),
         }
