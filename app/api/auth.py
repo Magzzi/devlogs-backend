@@ -37,9 +37,14 @@ async def login(body: LoginRequest):
         )
 
     if response.status_code != 200:
+        # Surface the actual Supabase error to help diagnose issues
+        try:
+            detail = response.json().get("msg") or response.json().get("error_description") or "Invalid email or password"
+        except Exception:
+            detail = "Invalid email or password"
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password",
+            detail=detail,
         )
 
     data = response.json()
