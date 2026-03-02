@@ -372,6 +372,7 @@ async def set_password(
                 headers=headers,
                 json={
                     "password": body.password,
+                    "user_metadata": {"has_password": True},
                 },
                 timeout=10,
             )
@@ -449,6 +450,25 @@ async def me(current_user: TokenData = Depends(get_current_user)):
     except Exception:
         # Default to True to avoid blocking users if check fails
         has_password = True
+
+    # Also check user_metadata for has_password flag (set when OAuth user adds a password)
+    if not has_password:
+        try:
+            user_url = f"{settings.SUPABASE_URL}/auth/v1/admin/users/{current_user.user_id}"
+            admin_headers = {
+                "apikey": settings.SUPABASE_SERVICE_KEY,
+                "Authorization": f"Bearer {settings.SUPABASE_SERVICE_KEY}",
+            }
+            import httpx as _httpx
+            async with _httpx.AsyncClient() as client:
+                user_resp = await client.get(user_url, headers=admin_headers, timeout=10)
+            if user_resp.status_code == 200:
+                user_data = user_resp.json()
+                meta = user_data.get("user_metadata") or {}
+                if meta.get("has_password"):
+                    has_password = True
+        except Exception:
+            pass
     
     return {
         "id": str(current_user.user_id),
